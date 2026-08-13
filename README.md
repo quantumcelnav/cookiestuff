@@ -4,6 +4,9 @@
 
 No dependencies for HAR analysis. Optional `playwright` for live URL scanning.
 
+**Paper:** [Detecting Affiliate Cookie Stuffing via Information-Theoretic Navigation Novelty Scoring](paper/cookiestuff_detection.md) — describes the algorithm, validates it, and outlines how organizations with existing software distribution can deploy this detection in products to protect their customers.  
+**License:** Apache 2.0 — includes explicit patent grant and patent retaliation clause.
+
 ---
 
 ## What is cookie stuffing?
