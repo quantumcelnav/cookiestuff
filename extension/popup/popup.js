@@ -72,6 +72,13 @@ function buildDomainCard(r) {
 
 // ─── Render state into the popup ──────────────────────────────────────────────
 
+function buildSection(title, items, colorClass) {
+  if (items.length === 0) return "";
+  return `
+    <div class="section-header ${colorClass}">${title}</div>
+    ${items.map(buildDomainCard).join("")}`;
+}
+
 function render(state) {
   // Stats
   const lzEl = $("lz-rate");
@@ -80,7 +87,6 @@ function render(state) {
   $("cookie-count").textContent = state.totalCookies;
   $("nav-count").textContent    = state.navDictSize;
 
-  // Domain list
   const list         = $("domain-list");
   const deleteAllBtn = $("delete-all-btn");
 
@@ -93,14 +99,30 @@ function render(state) {
       </div>`;
     deleteAllBtn.hidden = true;
     $("header-status").textContent = "";
-  } else {
-    list.innerHTML = state.suspicious.map(buildDomainCard).join("");
-    const n = state.suspicious.length;
-    deleteAllBtn.textContent = `Delete all suspicious (${n})`;
-    deleteAllBtn.hidden      = false;
-    $("header-status").textContent = `${n} flagged`;
-    attachCardListeners();
+    return;
   }
+
+  const fraud    = state.suspicious.filter(r => r.isFraud);
+  const trackers = state.suspicious.filter(r => !r.isFraud);
+
+  list.innerHTML =
+    buildSection(`AFFILIATE FRAUD — ${fraud.length} confirmed network${fraud.length !== 1 ? "s" : ""}`,
+      fraud, "section-fraud") +
+    buildSection(`AD TRACKERS — ${trackers.length} suspicious (not fraud)`,
+      trackers, "section-tracker");
+
+  const fraudCount = fraud.length;
+  deleteAllBtn.textContent = fraudCount > 0
+    ? `Delete fraud cookies (${fraudCount})`
+    : `Delete all trackers (${trackers.length})`;
+  deleteAllBtn.hidden = false;
+
+  // Header shows only confirmed fraud count — that's what matters
+  $("header-status").textContent = fraudCount > 0
+    ? `${fraudCount} fraud`
+    : `${trackers.length} trackers`;
+
+  attachCardListeners();
 }
 
 // ─── Card interaction ─────────────────────────────────────────────────────────

@@ -229,14 +229,14 @@ function processEvent(ev) {
 
   updateBadge();
 
-  // Notify once per domain when it first crosses HIGH
-  if (r.verdict === "HIGH" && !r.notified) {
+  // Notify only for confirmed affiliate networks — avoids constant noise from
+  // generic ad trackers, which are a privacy problem but not commission fraud.
+  if (r.verdict === "HIGH" && r.network && !r.notified) {
     r.notified = true;
-    const net = r.network ? ` [${r.network}]` : "";
     browser.notifications.create(`cs-${domain}`, {
       type:    "basic",
-      title:   "CookieStuff: Affiliate Stuffing",
-      message: `${domain}${net} set a cookie you never navigated to.\nScore: ${r.suspicion.toFixed(2)}`,
+      title:   `Affiliate stuffing: ${r.network}`,
+      message: `${domain} dropped a commission cookie you never clicked.\nDelete it from the CookieStuff popup.`,
       iconUrl: browser.runtime.getURL("icons/icon.svg"),
     }).catch(() => {});
   }
@@ -325,11 +325,24 @@ function getSuspicious(threshold = DEFAULT_THRESHOLD) {
   return [...domainReports.values()].filter(r => r.suspicion >= threshold);
 }
 
+// Confirmed fraud: known affiliate network + high suspicion score.
+// General ad trackers score HIGH too but are a privacy issue, not commission fraud.
+function getConfirmedFraud() {
+  return getSuspicious().filter(r => r.network !== null);
+}
+
 function updateBadge() {
-  const count = getSuspicious().length;
-  if (count > 0) {
-    browser.action.setBadgeText({ text: String(count) });
+  const fraud   = getConfirmedFraud().length;
+  const suspect = getSuspicious().length;
+
+  if (fraud > 0) {
+    // Red badge: confirmed affiliate network stuffing
+    browser.action.setBadgeText({ text: String(fraud) });
     browser.action.setBadgeBackgroundColor({ color: "#f7768e" });
+  } else if (suspect > 0) {
+    // Amber badge: suspicious trackers but no confirmed affiliate network
+    browser.action.setBadgeText({ text: "!" });
+    browser.action.setBadgeBackgroundColor({ color: "#e0af68" });
   } else {
     browser.action.setBadgeText({ text: "" });
   }
@@ -363,8 +376,11 @@ async function deleteCookiesForDomain(targetDomain) {
 }
 
 async function deleteAllSuspicious() {
+  // Default: delete confirmed fraud (known affiliate networks) only.
+  // Trackers are bad but deleting them indiscriminately surprises users.
+  const targets = getConfirmedFraud().length > 0 ? getConfirmedFraud() : getSuspicious();
   let total = 0;
-  for (const r of getSuspicious()) {
+  for (const r of targets) {
     total += await deleteCookiesForDomain(r.domain);
   }
   return total;
@@ -372,31 +388,35 @@ async function deleteAllSuspicious() {
 
 // ─── State query (called by popup) ───────────────────────────────────────────
 
+function serializeReport(r) {
+  return {
+    domain:      r.domain,
+    network:     r.network,
+    isFraud:     r.network !== null,   // confirmed affiliate network = commission fraud
+    suspicion:   Math.round(r.suspicion * 100) / 100,
+    verdict:     r.verdict,
+    cookieCount: r.cookies.length,
+    cookieNames: [...new Set(r.cookies.map(c => c.name))].slice(0, 6),
+    signals: {
+      lzNovelty:       r.lzNovelty,
+      affiliateUrl:    r.affiliateUrl,
+      affiliateCookie: r.affiliateCookie,
+      hiddenResource:  r.hiddenResource,
+      earlyTiming:     r.earlyTiming,
+      noReferrer:      r.noReferrer,
+    },
+    topCookie: r.cookies[0] ? {
+      name:       r.cookies[0].name,
+      type:       r.cookies[0].resourceType,
+      timestamp:  Math.round(r.cookies[0].timestamp * 10) / 10,
+      hasReferer: !!r.cookies[0].referer,
+    } : null,
+  };
+}
+
 function getState() {
-  const suspicious = getSuspicious()
-    .sort((a, b) => b.suspicion - a.suspicion)
-    .map(r => ({
-      domain:          r.domain,
-      network:         r.network,
-      suspicion:       Math.round(r.suspicion * 100) / 100,
-      verdict:         r.verdict,
-      cookieCount:     r.cookies.length,
-      cookieNames:     [...new Set(r.cookies.map(c => c.name))].slice(0, 6),
-      signals: {
-        lzNovelty:       r.lzNovelty,
-        affiliateUrl:    r.affiliateUrl,
-        affiliateCookie: r.affiliateCookie,
-        hiddenResource:  r.hiddenResource,
-        earlyTiming:     r.earlyTiming,
-        noReferrer:      r.noReferrer,
-      },
-      topCookie: r.cookies[0] ? {
-        name:       r.cookies[0].name,
-        type:       r.cookies[0].resourceType,
-        timestamp:  Math.round(r.cookies[0].timestamp * 10) / 10,
-        hasReferer: !!r.cookies[0].referer,
-      } : null,
-    }));
+  const allSuspicious = getSuspicious().sort((a, b) => b.suspicion - a.suspicion);
+  const suspicious = allSuspicious.map(serializeReport);
 
   // LZ novelty rate = fraction of all cookie events from novel domains
   const missEvents = [...domainReports.values()]

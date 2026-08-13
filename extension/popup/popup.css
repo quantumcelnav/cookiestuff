@@ -118,6 +118,18 @@ header h1 {
 #empty-state p       { font-size: 13px; }
 #empty-state p.dim   { font-size: 11px; margin-top: 4px; }
 
+/* ── Section headers ─────────────────────────────────────────────────────── */
+.section-header {
+  padding: 5px 14px 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+.section-fraud   { color: var(--red);    background: rgba(247,118,142,0.08); }
+.section-tracker { color: var(--yellow); background: rgba(224,175,104,0.06); }
+
 /* ── Domain card ─────────────────────────────────────────────────────────── */
 .domain-card {
   padding: 10px 14px;
