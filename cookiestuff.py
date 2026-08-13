@@ -33,11 +33,16 @@ Usage:
 import argparse
 import json
 import math
+import os
 import re
+import shutil
+import sqlite3
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -653,6 +658,371 @@ def capture_url(url: str, wait: float = 4.0, headless: bool = True) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Browser-native cookie scanner
+# ---------------------------------------------------------------------------
+
+def _browser_profile_dirs() -> list[tuple[str, Path]]:
+    """Return (label, profile_path) for every detected Chromium-family browser profile."""
+    home = Path.home()
+    plat = sys.platform
+
+    if plat == "darwin":
+        roots = [
+            ("Chrome",      home / "Library/Application Support/Google/Chrome"),
+            ("Chrome Beta", home / "Library/Application Support/Google/Chrome Beta"),
+            ("Chromium",    home / "Library/Application Support/Chromium"),
+            ("Edge",        home / "Library/Application Support/Microsoft Edge"),
+            ("Brave",       home / "Library/Application Support/BraveSoftware/Brave-Browser"),
+            ("Vivaldi",     home / "Library/Application Support/Vivaldi"),
+            ("Opera",       home / "Library/Application Support/com.operasoftware.Opera"),
+        ]
+    elif plat.startswith("linux"):
+        roots = [
+            ("Chrome",   home / ".config/google-chrome"),
+            ("Chromium", home / ".config/chromium"),
+            ("Edge",     home / ".config/microsoft-edge"),
+            ("Brave",    home / ".config/BraveSoftware/Brave-Browser"),
+        ]
+    elif plat == "win32":
+        ld = Path(os.environ.get("LOCALAPPDATA", ""))
+        roots = [
+            ("Chrome",   ld / "Google/Chrome/User Data"),
+            ("Edge",     ld / "Microsoft/Edge/User Data"),
+            ("Brave",    ld / "BraveSoftware/Brave-Browser/User Data"),
+        ]
+    else:
+        roots = []
+
+    results = []
+    for name, root in roots:
+        if not root.exists():
+            continue
+        for profile in ["Default", "Profile 1", "Profile 2", "Profile 3",
+                        "Profile 4", "Profile 5"]:
+            p = root / profile
+            if (p / "Cookies").exists() or (p / "History").exists():
+                label = name if profile == "Default" else f"{name} / {profile}"
+                results.append((label, p))
+    return results
+
+
+def _firefox_profile_dirs() -> list[tuple[str, Path]]:
+    home = Path.home()
+    plat = sys.platform
+
+    if plat == "darwin":
+        base = home / "Library/Application Support/Firefox/Profiles"
+    elif plat.startswith("linux"):
+        base = home / ".mozilla/firefox"
+    elif plat == "win32":
+        base = Path(os.environ.get("APPDATA", "")) / "Mozilla/Firefox/Profiles"
+    else:
+        return []
+
+    if not base.exists():
+        return []
+
+    return [
+        (f"Firefox ({d.name})", d)
+        for d in base.iterdir()
+        if d.is_dir() and (d / "cookies.sqlite").exists()
+    ]
+
+
+def _copy_db(src: Path) -> Optional[Path]:
+    """Copy a SQLite file to temp so we can read it while the browser holds the lock."""
+    if not src.exists():
+        return None
+    try:
+        fd, dst = tempfile.mkstemp(suffix=".sqlite", prefix="cookiestuff_")
+        os.close(fd)
+        shutil.copy2(src, dst)
+        return Path(dst)
+    except OSError:
+        return None
+
+
+def _chromium_history_domains(profile: Path) -> set[str]:
+    tmp = _copy_db(profile / "History")
+    if not tmp:
+        return set()
+    domains: set[str] = set()
+    try:
+        conn = sqlite3.connect(str(tmp))
+        for (url,) in conn.execute("SELECT url FROM urls WHERE url IS NOT NULL"):
+            d = _domain(url)
+            if d:
+                domains.add(d)
+        conn.close()
+    except sqlite3.Error:
+        pass
+    finally:
+        tmp.unlink(missing_ok=True)
+    return domains
+
+
+def _firefox_history_domains(profile: Path) -> set[str]:
+    tmp = _copy_db(profile / "places.sqlite")
+    if not tmp:
+        return set()
+    domains: set[str] = set()
+    try:
+        conn = sqlite3.connect(str(tmp))
+        for (url,) in conn.execute(
+            "SELECT url FROM moz_places WHERE url IS NOT NULL"
+        ):
+            d = _domain(url)
+            if d:
+                domains.add(d)
+        conn.close()
+    except sqlite3.Error:
+        pass
+    finally:
+        tmp.unlink(missing_ok=True)
+    return domains
+
+
+@dataclass
+class BrowserCookie:
+    browser: str
+    domain:  str
+    name:    str
+
+
+def _chromium_cookies(profile: Path, label: str) -> list[BrowserCookie]:
+    tmp = _copy_db(profile / "Cookies")
+    if not tmp:
+        return []
+    cookies: list[BrowserCookie] = []
+    try:
+        conn = sqlite3.connect(str(tmp))
+        for (host, name) in conn.execute("SELECT host_key, name FROM cookies"):
+            if host:
+                cookies.append(BrowserCookie(label, host.lstrip("."), name or ""))
+        conn.close()
+    except sqlite3.Error:
+        pass
+    finally:
+        tmp.unlink(missing_ok=True)
+    return cookies
+
+
+def _firefox_cookies(profile: Path, label: str) -> list[BrowserCookie]:
+    tmp = _copy_db(profile / "cookies.sqlite")
+    if not tmp:
+        return []
+    cookies: list[BrowserCookie] = []
+    try:
+        conn = sqlite3.connect(str(tmp))
+        for (host, name) in conn.execute("SELECT host, name FROM moz_cookies"):
+            if host:
+                cookies.append(BrowserCookie(label, host.lstrip("."), name or ""))
+        conn.close()
+    except sqlite3.Error:
+        pass
+    finally:
+        tmp.unlink(missing_ok=True)
+    return cookies
+
+
+def scan_browser(threshold: float = 0.35) -> dict:
+    """
+    Scan all browser cookie databases on this machine.
+
+    Reads browser history as the navigation dictionary (same LZ novelty approach as HAR
+    analysis). Three of six signals are available without a live session: LZ novelty,
+    affiliate domain fingerprint, and affiliate cookie name. Score is renormalized to
+    the 0.0–1.0 range so the same HIGH/MEDIUM/CLEAN thresholds apply.
+    """
+    all_cookies: list[BrowserCookie] = []
+    nav_domains: set[str] = set()
+    scanned: list[str] = []
+
+    for label, profile in _browser_profile_dirs():
+        h = _chromium_history_domains(profile)
+        c = _chromium_cookies(profile, label)
+        if h or c:
+            nav_domains |= h
+            all_cookies.extend(c)
+            scanned.append(label)
+
+    for label, profile in _firefox_profile_dirs():
+        h = _firefox_history_domains(profile)
+        c = _firefox_cookies(profile, label)
+        if h or c:
+            nav_domains |= h
+            all_cookies.extend(c)
+            scanned.append(label)
+
+    by_domain: dict[str, list[BrowserCookie]] = defaultdict(list)
+    for ck in all_cookies:
+        if ck.domain:
+            by_domain[ck.domain].append(ck)
+
+    def _in_dict(d: str) -> bool:
+        return d in nav_domains or any(
+            d.endswith("." + n) or n.endswith("." + d) for n in nav_domains
+        )
+
+    suspicious: dict[str, dict] = {}
+    clean:      dict[str, dict] = {}
+
+    for domain, cks in by_domain.items():
+        lz      = 0.0 if _in_dict(domain) else 1.0
+        network = _match_affiliate_domain(domain)
+        aff_dom = 1.0 if network else 0.0
+        aff_ck  = max((_affiliate_cookie_score(ck.name) for ck in cks), default=0.0)
+
+        # Renormalize over available signal weights: 0.30 + 0.25 + 0.15 = 0.70
+        score   = min(1.0, (0.30 * lz + 0.25 * aff_dom + 0.15 * aff_ck) / 0.70)
+        verdict = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.35 else "CLEAN")
+
+        rec = {
+            "domain":     domain,
+            "cookies":    cks,
+            "network":    network,
+            "lz_novelty": lz,
+            "aff_domain": aff_dom,
+            "aff_cookie": aff_ck,
+            "score":      score,
+            "verdict":    verdict,
+            "browsers":   sorted({ck.browser for ck in cks}),
+        }
+        if score >= threshold:
+            suspicious[domain] = rec
+        else:
+            clean[domain] = rec
+
+    return {
+        "mode":          "browser_scan",
+        "scanned":       scanned,
+        "nav_count":     len(nav_domains),
+        "total_cookies": len(all_cookies),
+        "total_domains": len(by_domain),
+        "suspicious":    suspicious,
+        "clean":         clean,
+        "threshold":     threshold,
+    }
+
+
+def print_scan_report(result: dict, verbose: bool = False, guide: bool = False) -> None:
+    suspicious = result["suspicious"]
+    clean      = result["clean"]
+
+    print()
+    print(_color("Browser Cookie Audit", BOLD))
+    print("─" * 50)
+    for b in result["scanned"]:
+        print(f"  Browser : {b}")
+    print(f"  History : {result['nav_count']:,} domains  (navigation dictionary from history)")
+    print(f"  Cookies : {result['total_cookies']:,} total across {result['total_domains']:,} domains")
+    print()
+    print(_color("  Active signals: LZ novelty · affiliate domain · affiliate cookie name", DIM))
+    print(_color("  Timing + referrer signals require a live session (--url or HAR file)", DIM))
+    print()
+
+    if suspicious:
+        print(_color(f"  SUSPICIOUS ({len(suspicious)} domain{'s' if len(suspicious) != 1 else ''}):", BOLD))
+        for domain, r in sorted(suspicious.items(), key=lambda x: -x[1]["score"]):
+            vc         = VERDICT_COLOR[r["verdict"]]
+            label      = f"[{r['network']}]" if r["network"] else "[unknown network]"
+            n_ck       = len(r["cookies"])
+            verdict_str = f"⚠  {r['verdict']:<6}"
+            print(f"    {_color(verdict_str, vc)}  {domain}  "
+                  f"{_color(label, DIM)}  "
+                  f"{n_ck} cookie{'s' if n_ck != 1 else ''}  "
+                  f"score={r['score']:.2f}")
+            print(f"             {_color(', '.join(r['browsers']), DIM)}")
+            if verbose:
+                _print_scan_signals(r)
+    else:
+        print(_color("  No suspicious affiliate cookies found.", GRN))
+
+    print()
+    if clean and verbose:
+        print(_color(f"  CLEAN ({len(clean)} domains):", DIM))
+        for domain, r in sorted(clean.items()):
+            print(f"    {_color('✓', GRN)}  {domain}  ({len(r['cookies'])} cookies)")
+        print()
+
+    if suspicious:
+        print(_color("  Summary:", BOLD))
+        print(f"  {len(suspicious)} of {result['total_domains']} cookie domains are suspicious.")
+        print(f"  Run with --verbose for per-signal detail and cookie names.")
+        print(f"  Run with --guide for step-by-step removal instructions.")
+    print()
+
+    if guide:
+        _print_scan_removal_guide(result)
+
+
+def _print_scan_signals(r: dict) -> None:
+    def bar(v: float) -> str:
+        n = int(v * 10)
+        return "█" * n + "░" * (10 - n)
+    na = "─" * 10
+    print(f"         LZ novelty      [{bar(r['lz_novelty'])}] {r['lz_novelty']:.2f}  "
+          f"({'not in history' if r['lz_novelty'] else 'in history'})")
+    print(f"         Affiliate domain[{bar(r['aff_domain'])}] {r['aff_domain']:.2f}")
+    print(f"         Affiliate cookie[{bar(r['aff_cookie'])}] {r['aff_cookie']:.2f}")
+    print(f"         Hidden resource [{na}] N/A")
+    print(f"         Early timing    [{na}] N/A")
+    print(f"         No referrer     [{na}] N/A")
+    for ck in r["cookies"][:5]:
+        print(f"         cookie: {ck.name!r}  ({ck.browser})")
+
+
+def _print_scan_removal_guide(result: dict) -> None:
+    suspicious = result["suspicious"]
+    if not suspicious:
+        return
+
+    by_browser: dict[str, list[str]] = defaultdict(list)
+    for domain, r in suspicious.items():
+        for b in r["browsers"]:
+            by_browser[b].append(domain)
+
+    print(_color("How to remove these cookies", BOLD))
+    print("─" * 50)
+    print()
+    print("  Suspicious domains found:")
+    for domain, r in sorted(suspicious.items(), key=lambda x: -x[1]["score"]):
+        label = f"  [{r['network']}]" if r["network"] else ""
+        print(f"    • {domain}{label}")
+    print()
+
+    for browser_label in sorted(by_browser.keys()):
+        domains = by_browser[browser_label]
+        print(_color(f"  {browser_label}", BOLD))
+        if "Firefox" in browser_label:
+            print("  1. Settings → Privacy & Security → Cookies and Site Data → Manage Data")
+            for d in domains:
+                print(f"  2. Search '{d}' → Remove Selected → Save Changes")
+            print("  — Or: F12 → Storage → Cookies → select domain → delete all rows")
+        else:
+            print("  Surgical removal:")
+            print("  1. Settings → Privacy and security → Cookies and other site data")
+            print("  2. See all site data and permissions")
+            for d in domains:
+                print(f"  3. Search '{d}' → click the trash icon")
+            print("  — Or nuclear: Settings → Delete browsing data → All time → Cookies → Delete")
+        print()
+
+    print(_color("  DevTools (fastest — works in any browser)", BOLD))
+    print("  F12 → Application tab → Cookies (left sidebar)")
+    for domain in sorted(suspicious.keys()):
+        print(f"    Select '{domain}' → Ctrl+A / Cmd+A → Delete")
+    print()
+
+    print(_color("  Report the fraud", BOLD))
+    print("  • The retailer's affiliate team  (search '<retailer> affiliate program')")
+    print("  • FTC (US):   reportfraud.ftc.gov")
+    print("  • ICO (UK):   ico.org.uk/make-a-complaint")
+    print("  • Your state attorney general")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Removal guide printer
 # ---------------------------------------------------------------------------
 
@@ -743,7 +1113,35 @@ def main():
                     help="After the report, print browser cookie removal instructions")
     ap.add_argument("--demo", action="store_true",
                     help="Run on built-in synthetic stuffed session (no file needed)")
+    ap.add_argument("--scan-browser", action="store_true",
+                    help="Scan browser cookie databases on this machine (Chrome, Firefox, Edge, Brave)")
     args = ap.parse_args()
+
+    # --- Browser scan mode (reads local databases, no HAR needed) ---
+    if args.scan_browser:
+        print(_color("[scanning browser databases…]", DIM), flush=True)
+        result = scan_browser(threshold=args.threshold)
+        if args.json:
+            out = {k: v for k, v in result.items() if k not in ("suspicious", "clean")}
+            out["suspicious"] = {
+                d: {
+                    "score":    round(r["score"], 3),
+                    "verdict":  r["verdict"],
+                    "network":  r["network"],
+                    "cookies":  len(r["cookies"]),
+                    "browsers": r["browsers"],
+                    "signals": {
+                        "lz_novelty": r["lz_novelty"],
+                        "aff_domain": r["aff_domain"],
+                        "aff_cookie": r["aff_cookie"],
+                    },
+                }
+                for d, r in result["suspicious"].items()
+            }
+            print(json.dumps(out, indent=2))
+        else:
+            print_scan_report(result, verbose=args.verbose, guide=args.guide)
+        sys.exit(1 if result["suspicious"] else 0)
 
     # --- Load HAR ---
     if args.demo:
@@ -770,7 +1168,8 @@ def main():
     else:
         ap.print_help()
         print("\nExamples:")
-        print("  python cookiestuff.py --demo")
+        print("  python cookiestuff.py --scan-browser --guide   # audit your machine right now")
+        print("  python cookiestuff.py --demo                   # see the tool in action")
         print("  python cookiestuff.py --url https://example.com --verbose --guide")
         print("  python cookiestuff.py session.har --guide")
         sys.exit(0)

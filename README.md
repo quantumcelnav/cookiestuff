@@ -38,6 +38,52 @@ python3 cookiestuff.py --demo --guide
 
 ---
 
+## Who uses this tool
+
+| I want to… | Command |
+|---|---|
+| **Audit all cookies already on my machine** | `--scan-browser --guide` |
+| Check whether a specific site is stuffing me | `--url https://site.com --guide` |
+| Investigate a site, see full signal breakdown | `--url https://site.com --verbose` |
+| Analyze a captured browser session (HAR file) | `session.har --verbose` |
+| Output machine-readable JSON for a script | `--scan-browser --json` or `session.har --json` |
+| Check a site that requires login | `--url https://site.com --no-headless` |
+| See the tool in action before I have a real target | `--demo --verbose` |
+
+**Signal availability by mode:**
+
+| Signal | `--scan-browser` | `--url` / HAR file |
+|---|:---:|:---:|
+| LZ novelty — domain not in your navigation history | ✓ | ✓ |
+| Affiliate network fingerprint | ✓ | ✓ |
+| Affiliate cookie name patterns | ✓ | ✓ |
+| Hidden resource type (pixel / XHR / iframe) | — | ✓ |
+| Early timing — fired within 500ms of load | — | ✓ |
+| No referrer header | — | ✓ |
+
+`--scan-browser` reads your browser's existing history as the navigation dictionary so the core LZ novelty signal is available without capturing a new session. The timing and referrer signals require live capture (`--url`) or a HAR file.
+
+---
+
+## Scanning your machine (no capture needed)
+
+This is the right starting point for most users. It reads the browser databases already on your disk — no manual traffic capture required.
+
+```bash
+python3 cookiestuff.py --scan-browser
+python3 cookiestuff.py --scan-browser --guide          # + removal instructions
+python3 cookiestuff.py --scan-browser --verbose        # + per-domain signal breakdown
+python3 cookiestuff.py --scan-browser --json           # machine-readable output
+```
+
+Supported browsers: **Chrome, Chrome Beta, Chromium, Edge, Brave, Vivaldi, Opera** (all profiles), and **Firefox** (all profiles). Safari is not yet supported (binary cookie format).
+
+**How it works:** The tool copies each browser's `Cookies` and `History` SQLite databases to a temporary location (so it can read them while the browser is running), extracts every visited domain from your history as the navigation dictionary, then scores each stored cookie domain against that dictionary using the same LZ novelty approach as live session analysis. Cookies from domains you never visited score high on LZ novelty; cookies whose domain or name matches a known affiliate network score high on the network fingerprint signals.
+
+**Note:** The tool reads cookie names and domains only — it does not decrypt or read cookie values.
+
+---
+
 ## Scanning a live URL (recommended)
 
 This is the easiest path — no manual browser steps. Install Playwright once:
@@ -260,7 +306,7 @@ To add a network: edit `AFFILIATE_DOMAINS` in `cookiestuff.py`. PRs welcome.
 
 ## Limitations
 
-- **HAR / Playwright only.** This is a forensic analyzer, not a real-time blocker. For live blocking use uBlock Origin.
+- **Not a real-time blocker.** For live blocking use uBlock Origin or Firefox's Enhanced Tracking Protection. This tool audits and reports; it does not intercept.
 - **Legitimate affiliate cookies.** If you clicked an affiliate link in a banner, the resulting cookie is legitimate — this tool may still flag it. Use `--verbose` and check the timestamp: a cookie set seconds after a user click is likely legitimate; one set within 500ms of page load almost certainly is not.
 - **First-party programs.** Retailers running their own affiliate tracking on custom subdomains won't match the network list. The LZ novelty and timing signals still apply.
 - **Headless detection.** Some sites serve different content to headless browsers. Use `--no-headless` to load the real page.
