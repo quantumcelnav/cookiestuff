@@ -3,6 +3,19 @@
 const $  = id => document.getElementById(id);
 const qs = sel => document.querySelector(sel);
 
+function esc(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function setHTML(el, html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  el.replaceChildren(...doc.body.childNodes);
+}
+
 // ─── Rendering helpers ────────────────────────────────────────────────────────
 
 function lzColor(rate) {
@@ -34,26 +47,26 @@ function buildSignalRows(signals) {
 
 function buildDomainCard(r) {
   const netTag = r.network
-    ? `<span class="network-tag">[${r.network}]</span>` : "";
+    ? `<span class="network-tag">[${esc(r.network)}]</span>` : "";
 
   const chips = r.cookieNames.map(n =>
-    `<span class="chip">${n}</span>`
+    `<span class="chip">${esc(n)}</span>`
   ).join("") + (r.cookieCount > r.cookieNames.length
     ? `<span class="chip more">+${r.cookieCount - r.cookieNames.length}</span>` : "");
 
   const topLine = r.topCookie
-    ? `<span>${r.topCookie.type} @ ${r.topCookie.timestamp}s` +
+    ? `<span>${esc(r.topCookie.type)} @ ${esc(r.topCookie.timestamp)}s` +
       `${r.topCookie.hasReferer ? "" : " · no referer"}</span>`
     : "";
 
-  // Escape domain for use as DOM id
-  const safeId = "sig-" + r.domain.replace(/[^a-zA-Z0-9]/g, "_");
+  const safeId  = "sig-" + r.domain.replace(/[^a-zA-Z0-9]/g, "_");
+  const domEsc  = esc(r.domain);
 
   return `
-    <div class="domain-card ${r.verdict}" data-domain="${r.domain}">
+    <div class="domain-card ${esc(r.verdict)}" data-domain="${domEsc}">
       <div class="card-header">
-        <span class="verdict-pill ${r.verdict}">${r.verdict}</span>
-        <span class="domain-name" title="${r.domain}">${r.domain}</span>
+        <span class="verdict-pill ${esc(r.verdict)}">${esc(r.verdict)}</span>
+        <span class="domain-name" title="${domEsc}">${domEsc}</span>
         <span class="score-val">${fmtScore(r.suspicion)}</span>
       </div>
       <div class="card-meta">
@@ -65,7 +78,7 @@ function buildDomainCard(r) {
       <div class="signals-panel" id="${safeId}">${buildSignalRows(r.signals)}</div>
       <div class="card-actions">
         <button class="btn-toggle" data-target="${safeId}">▸ signals</button>
-        <button class="btn-del-domain" data-domain="${r.domain}">Delete cookies</button>
+        <button class="btn-del-domain" data-domain="${domEsc}">Delete cookies</button>
       </div>
     </div>`;
 }
@@ -91,12 +104,12 @@ function render(state) {
   const deleteAllBtn = $("delete-all-btn");
 
   if (!state.suspicious || state.suspicious.length === 0) {
-    list.innerHTML = `
+    setHTML(list, `
       <div id="empty-state">
         <span class="clean-icon">✓</span>
         <p>Session is clean</p>
         <p class="dim">No affiliate stuffing detected yet.</p>
-      </div>`;
+      </div>`);
     deleteAllBtn.hidden = true;
     $("header-status").textContent = "";
     return;
@@ -105,11 +118,11 @@ function render(state) {
   const fraud    = state.suspicious.filter(r => r.isFraud);
   const trackers = state.suspicious.filter(r => !r.isFraud);
 
-  list.innerHTML =
+  setHTML(list,
     buildSection(`AFFILIATE FRAUD — ${fraud.length} confirmed network${fraud.length !== 1 ? "s" : ""}`,
       fraud, "section-fraud") +
     buildSection(`AD TRACKERS — ${trackers.length} suspicious (not fraud)`,
-      trackers, "section-tracker");
+      trackers, "section-tracker"));
 
   const fraudCount = fraud.length;
   deleteAllBtn.textContent = fraudCount > 0

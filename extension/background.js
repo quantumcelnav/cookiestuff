@@ -257,9 +257,7 @@ browser.webNavigation.onCommitted.addListener(details => {
   }
 });
 
-browser.tabs.onRemoved.addListener(tabId => {
-  pageStartTimes.delete(tabId);
-});
+// pageStartTimes is session-only and bounded by open tab count; no explicit cleanup needed.
 
 // ─── Request listeners ────────────────────────────────────────────────────────
 
