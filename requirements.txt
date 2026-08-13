@@ -1,0 +1,5 @@
+# Core tool — no dependencies (stdlib only)
+
+# Optional: live URL scanning
+# pip install playwright && playwright install chromium
+playwright>=1.40.0

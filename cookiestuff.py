@@ -584,29 +584,178 @@ def _make_demo_har() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Live URL capture via Playwright
+# ---------------------------------------------------------------------------
+
+def _check_playwright() -> None:
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        print(
+            "Error: --url requires playwright.\n\n"
+            "Install with:\n"
+            "  pip install playwright\n"
+            "  playwright install chromium\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+async def _capture_har_async(url: str, wait: float, headless: bool,
+                              har_path: str) -> None:
+    from playwright.async_api import async_playwright
+    import asyncio
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(
+            record_har_path=har_path,
+            record_har_content="omit",   # skip response bodies — we only need headers/cookies
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        except Exception:
+            pass  # partial loads still capture cookies
+        # wait for lazy-loaded affiliate scripts (the stuffing often fires 1-3s in)
+        await asyncio.sleep(wait)
+        await context.close()
+        await browser.close()
+
+
+def capture_url(url: str, wait: float = 4.0, headless: bool = True) -> dict:
+    """
+    Visit *url* in a headless Chromium browser, record all network traffic as
+    HAR, and return the parsed HAR dict.  Waits *wait* seconds after DOMContentLoaded
+    to catch lazy-loaded affiliate scripts.
+    """
+    import asyncio, tempfile, os
+
+    _check_playwright()
+
+    with tempfile.NamedTemporaryFile(suffix=".har", delete=False) as f:
+        har_path = f.name
+
+    try:
+        asyncio.run(_capture_har_async(url, wait, headless, har_path))
+        with open(har_path, "r", errors="replace") as f:
+            return json.load(f)
+    finally:
+        try:
+            os.unlink(har_path)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Removal guide printer
+# ---------------------------------------------------------------------------
+
+def print_removal_guide(result: dict) -> None:
+    suspicious = result["suspicious"]
+    if not suspicious:
+        return
+
+    domains = sorted(suspicious)
+    print(_color("How to remove these cookies", BOLD))
+    print("─" * 50)
+    print()
+    print("  The following domains dropped cookies without your consent:")
+    for d in domains:
+        r = suspicious[d]
+        label = f"  [{r.network_name}]" if r.network_name else ""
+        print(f"    • {d}{label}")
+    print()
+
+    print(_color("  Chrome / Edge", BOLD))
+    print("  1. Open Settings → Privacy and security → Delete browsing data")
+    print("  2. Choose 'All time', check 'Cookies and other site data', click Delete")
+    print("     — OR — for surgical removal:")
+    print("  1. Settings → Privacy and security → Cookies and other site data")
+    print("  2. 'See all site data and permissions'")
+    for d in domains:
+        print(f"  3. Search '{d}', click the trash icon")
+    print()
+
+    print(_color("  Firefox", BOLD))
+    print("  1. Settings → Privacy & Security → Cookies and Site Data → Manage Data")
+    for d in domains:
+        print(f"  2. Search '{d}', select, click 'Remove Selected'")
+    print()
+
+    print(_color("  Safari", BOLD))
+    print("  1. Develop menu → Show Web Inspector → Storage tab → Cookies")
+    for d in domains:
+        print(f"  2. Find '{d}', right-click → Delete")
+    print("  — OR — Safari → Settings → Privacy → Manage Website Data")
+    print()
+
+    print(_color("  DevTools (any browser) — surgical, one domain at a time", BOLD))
+    print("  1. F12 → Application tab → Cookies (left sidebar)")
+    for d in domains:
+        print(f"  2. Select '{d}' → select all rows → Delete")
+    print()
+
+    print(_color("  Report the fraud", BOLD))
+    print("  Stuffing harms the retailers who pay commissions and the legitimate")
+    print("  affiliates who drove the sale. Report to:")
+    print()
+    print("  • The retailer's affiliate team")
+    print("    (search '<retailer> affiliate program contact')")
+    print("  • The affiliate network directly:")
+    for d, r in suspicious.items():
+        if r.network_name:
+            print(f"    - {r.network_name}: report publisher fraud via their dashboard")
+    print("  • FTC (US):  reportfraud.ftc.gov")
+    print("  • ICO (UK):  ico.org.uk/make-a-complaint")
+    print("  • Your state attorney general")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Detect cookie stuffing in HAR files.",
+        description="Detect cookie stuffing in HAR files or live URLs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("Usage:")[1].strip() if "Usage:" in __doc__ else "",
     )
-    ap.add_argument("har_file", nargs="?", help="Path to .har file")
+    ap.add_argument("har_file", nargs="?", help="Path to .har file to analyze")
+    ap.add_argument("--url", metavar="URL",
+                    help="Visit this URL in headless Chromium, capture HAR, and analyze")
+    ap.add_argument("--wait", type=float, default=4.0, metavar="SECONDS",
+                    help="Seconds to wait after page load when using --url (default: 4)")
+    ap.add_argument("--no-headless", action="store_true",
+                    help="Show browser window when using --url (useful for debugging)")
     ap.add_argument("--threshold", type=float, default=0.35,
                     help="Suspicion score threshold for flagging (default: 0.35)")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="Show per-signal breakdown and clean domains")
     ap.add_argument("--json", action="store_true",
-                    help="Output raw JSON result instead of formatted report")
+                    help="Output raw JSON instead of formatted report")
+    ap.add_argument("--guide", action="store_true",
+                    help="After the report, print browser cookie removal instructions")
     ap.add_argument("--demo", action="store_true",
                     help="Run on built-in synthetic stuffed session (no file needed)")
     args = ap.parse_args()
 
+    # --- Load HAR ---
     if args.demo:
         har = _make_demo_har()
         print(_color("[demo mode — synthetic stuffed session]", DIM))
+
+    elif args.url:
+        print(_color(f"[capturing {args.url} — please wait {args.wait:.0f}s …]", DIM),
+              flush=True)
+        har = capture_url(args.url, wait=args.wait, headless=not args.no_headless)
+        print(_color(f"[captured {len(har.get('log',{}).get('entries',[]))} requests]", DIM))
+
     elif args.har_file:
         try:
             with open(args.har_file, "r", errors="replace") as f:
@@ -617,32 +766,38 @@ def main():
         except json.JSONDecodeError as e:
             print(f"Error: invalid JSON in {args.har_file}: {e}", file=sys.stderr)
             sys.exit(1)
+
     else:
         ap.print_help()
+        print("\nExamples:")
+        print("  python cookiestuff.py --demo")
+        print("  python cookiestuff.py --url https://example.com --verbose --guide")
+        print("  python cookiestuff.py session.har --guide")
         sys.exit(0)
 
+    # --- Analyze ---
     result = analyze(har, threshold=args.threshold)
 
     if args.json:
-        # Make serializable
-        out = {k: v for k, v in result.items()
-               if k not in ("suspicious", "clean")}
+        out = {k: v for k, v in result.items() if k not in ("suspicious", "clean")}
         out["suspicious"] = {
             d: {"suspicion": round(r.suspicion, 3), "verdict": r.verdict,
                 "network": r.network_name, "cookies": len(r.cookies),
                 "signals": {
-                    "lz_novelty": r.lz_novelty,
-                    "affiliate_url": r.affiliate_url,
+                    "lz_novelty":       r.lz_novelty,
+                    "affiliate_url":    r.affiliate_url,
                     "affiliate_cookie": r.affiliate_cookie,
-                    "hidden_resource": r.hidden_resource,
-                    "early_timing": r.early_timing,
-                    "no_referrer": r.no_referrer,
+                    "hidden_resource":  r.hidden_resource,
+                    "early_timing":     r.early_timing,
+                    "no_referrer":      r.no_referrer,
                 }}
             for d, r in result["suspicious"].items()
         }
         print(json.dumps(out, indent=2))
     else:
         print_report(result, verbose=args.verbose)
+        if args.guide:
+            print_removal_guide(result)
 
     sys.exit(1 if result["suspicious"] else 0)
 
