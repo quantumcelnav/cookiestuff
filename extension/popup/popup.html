@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CookieStuff</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+
+    <header>
+      <img src="../icons/icon.svg" alt="" class="logo">
+      <h1>CookieStuff</h1>
+      <span id="header-status"></span>
+    </header>
+
+    <div id="stats">
+      <div class="stat-item">
+        <span class="stat-value" id="lz-rate">—</span>
+        <span class="stat-label">LZ novelty</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-item">
+        <span class="stat-value" id="cookie-count">—</span>
+        <span class="stat-label">cookies seen</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-item">
+        <span class="stat-value" id="nav-count">—</span>
+        <span class="stat-label">nav domains</span>
+      </div>
+    </div>
+
+    <div id="domain-list" role="list">
+      <div id="empty-state">
+        <span class="clean-icon">✓</span>
+        <p>Session is clean</p>
+        <p class="dim">No affiliate stuffing detected yet.</p>
+      </div>
+    </div>
+
+    <footer>
+      <button id="delete-all-btn" class="btn-danger" hidden>Delete all</button>
+      <button id="clear-btn" class="btn-ghost">Clear session</button>
+    </footer>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

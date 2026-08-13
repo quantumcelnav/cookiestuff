@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "CookieStuff",
+  "version": "0.1.0",
+  "description": "Detects affiliate cookie stuffing in real time using LZ novelty scoring. Alerts when sites drop affiliate cookies you never navigated to.",
+
+  "permissions": [
+    "webRequest",
+    "webNavigation",
+    "cookies",
+    "storage",
+    "notifications",
+    "tabs"
+  ],
+  "host_permissions": ["<all_urls>"],
+
+  "background": {
+    "scripts": ["background.js"]
+  },
+
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "CookieStuff — affiliate cookie detector",
+    "default_icon": "icons/icon.svg"
+  },
+
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  }
+}
