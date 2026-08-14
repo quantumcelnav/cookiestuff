@@ -22,8 +22,72 @@ const AFFILIATE_DOMAINS = {
   "Refersion":           ["refersion.com"],
   "Tune/HasOffers":      ["tune.com","hasoffers.com","app.link"],
   "CivicScience":        ["civicscience.com"],
-  "Generic trackers":    ["doubleclick.net","googleadservices.com"],
 };
+
+// Programmatic ad-tech / cookie-sync platforms — high LZ novelty by design
+// (they sync IDs across domains) but NOT affiliate commission fraud.
+// Domains here are suppressed from affiliate-fraud scoring; they still appear
+// in raw cookie counts but won't inflate the suspicion score or fraud flag.
+const ADTECH_DOMAINS = new Set([
+  // DSPs / Trading desks
+  "adsrvr.org",          // The Trade Desk
+  "rubiconproject.com",  // Magnite/Rubicon SSP
+  "pubmatic.com",        // PubMatic SSP
+  "onetag-sys.com",      // OneTag SSP
+  "smartadserver.com",   // Smart AdServer
+  "contextweb.com",      // PulsePoint
+  "yieldmo.com",         // Yieldmo
+  "undertone.com",       // Undertone/Perion
+  "media.net",           // Media.net
+  "lijit.com",           // Sovrn/Lijit
+  "bfmio.com",           // Beachfront
+  "aniview.com",         // AniView video
+  "rqtrk.eu",            // RetargetKit
+  "kueezrtb.com",        // Kueez RTB
+  "4dex.io",             // 4D programmatic
+  "cootlogix.com",       // Cootlogix DSP
+  "programmaticx.ai",    // ProgrammaticX
+  "ssp.cadent.com",      // Cadent SSP
+  "na.edge.optable.co",  // Optable
+  "securedvisit.com",    // SecuredVisit
+  "trustedstack.com",    // TrustedStack
+  "technoratimedia.com", // Technorati Media
+  "pxgdr.net",           // unknown pixel network
+  "bmtrcs.com",          // unknown tracker
+  "a.usbrowserspeed.com",
+  // Identity / data brokers
+  "tapad.com",           // Tapad (The Trade Desk) device graph
+  "pippio.com",          // LiveRamp
+  "agkn.com",            // Neustar/TransUnion
+  "csync.loopme.me",     // LoopMe ID sync
+  // Ad networks with cookie sync
+  "taboola.com",
+  // Social pixels (set cookies but don't earn affiliate commissions)
+  "snapchat.com",
+  "linkedin.com",
+  // Google ad infrastructure — display ads, not affiliate commissions
+  "doubleclick.net",
+  "googleadservices.com",
+  "googlesyndication.com",
+  // Analytics / CRM
+  "hubspot.com",
+  "www.clarity.ms",
+  "disqus.com",
+  "affirm.com",          // BNPL widget, not affiliate
+  "rkdms.com",           // Rakuten Marketing DMS (analytics, not commission)
+  "mediaplex.com",       // ValueClick/Conversant analytics
+  // Retail-tier FPs confirmed in rank-2000 sweep
+  "adnxs.com",           // AppNexus/Xandr DSP
+  "amazon-adsystem.com", // Amazon display ad pixel
+  "mookie1.com",         // Oracle/Moat ad measurement
+  "mediavine.com",       // Mediavine publisher SSP
+  "mediawallahscript.com", // MediaWallah identity resolution
+  "featureassets.org",   // Optimizely A/B CDN
+  "prodregistryv2.org",  // Optimizely registry CDN
+  "atlassian.com",       // Atlassian analytics (xp.atlassian.com)
+  "bing.com",            // Microsoft Advertising pixel
+  "yahoo.com",           // Yahoo/Oath ad network pixel
+]);
 
 const AFFILIATE_URL_PATTERNS = [
   /\/click\b/i, /\/track\b/i, /\/redirect\b/i, /\/go\b/i, /\/refer\b/i,
@@ -204,9 +268,25 @@ function createReport(domain) {
   };
 }
 
+function isAdTech(domain) {
+  if (ADTECH_DOMAINS.has(domain)) return true;
+  // Also suppress subdomains: "sync.tapad.com" → tapad.com
+  for (const d of ADTECH_DOMAINS) {
+    if (domain.endsWith("." + d)) return true;
+  }
+  return false;
+}
+
 function processEvent(ev) {
   totalCookieEvents++;
   const { domain } = ev;
+
+  // Skip localhost — browser internals, not web traffic.
+  if (domain === "localhost" || domain === "127.0.0.1" || domain === "::1") return;
+
+  // Known ad-tech / cookie-sync platforms: count the cookie but don't score
+  // for affiliate fraud. They're a privacy issue, not commission fraud.
+  if (isAdTech(domain)) return;
 
   if (!domainReports.has(domain)) {
     domainReports.set(domain, createReport(domain));
